@@ -23,12 +23,12 @@ if _has_secret("YOUTUBE_COOKIES"):
         f.write(st.secrets["YOUTUBE_COOKIES"])
 
 import config
+import rag_chat
 import vector_store
 from downloader import DownloadError
 from embedder import embed_chunks, embed_query
 from ingestion import IngestionError, SUPPORTED_UPLOAD_EXTENSIONS, hash_bytes, ingest_uploaded_file, ingest_youtube_url
 from notes_generator import generate_notes
-from rag_chat import answer_question
 from retrieval import retrieve
 
 st.set_page_config(page_title="Deep-Dive Video Note Taker", page_icon="🎯", layout="wide")
@@ -79,6 +79,7 @@ DEFAULTS = {
     "current_source_id": None,
     "current_title": None,
     "current_notes": None,
+    "current_transcript": None,
     "chat_history": [],
 }
 for key, default in DEFAULTS.items():
@@ -90,6 +91,7 @@ def _load_source_into_state(source_id: str, title: str):
     st.session_state.current_source_id = source_id
     st.session_state.current_title = title
     st.session_state.current_notes = vector_store.load_notes(source_id)
+    st.session_state.current_transcript = vector_store.load_transcript(source_id)
     st.session_state.chat_history = []
 
 
@@ -107,14 +109,43 @@ def _finish_ingestion(source, status):
     chunks = embed_chunks(source.chunks)
 
     status.write("📝 Generating notes...")
-    notes = generate_notes(source.full_text, source.raw_segments)
+    notes = generate_notes(
+        source.full_text, source.raw_segments, source_type=source.source_type, title=source.title
+    )
 
     status.write("💾 Saving to your library...")
     vector_store.save_source(
-        source.source_id, source.title, source.origin, notes, chunks, source_type=source.source_type
+        source.source_id,
+        source.title,
+        source.origin,
+        notes,
+        chunks,
+        source_type=source.source_type,
+        full_text=source.full_text,
     )
     _load_source_into_state(source.source_id, source.title)
     status.update(label=f"Done! Processed: {source.title}", state="complete")
+
+
+def _render_sources(sources: list):
+    """A concise 'Sources' section: only the specific evidence an answer
+    actually relied on (per rag_chat.extract_cited_sources), each shown
+    as a title + timestamp-or-page reference + clickable link where
+    available, with a short text preview - not the full raw chunk dump."""
+    if not sources:
+        st.caption("No sources were used for this answer.")
+        return
+    with st.expander(f"📌 Sources ({len(sources)})"):
+        for i, chunk in enumerate(sources, start=1):
+            info = rag_chat.describe_source(chunk)
+            header = f"**{i}. {info['title']}**"
+            if info["position"]:
+                header += f" · {info['position']}"
+            if info["link"]:
+                header += f" · [▶ open]({info['link']})"
+            st.markdown(header)
+            preview = chunk["text"][:280] + ("…" if len(chunk["text"]) > 280 else "")
+            st.caption(preview)
 
 
 # ---------------------------------------------------------------- Sidebar --
@@ -179,9 +210,9 @@ with tab_youtube:
                 st.error(f"❌ Couldn't download this video: {e}")
             except IngestionError as e:
                 st.error(f"❌ {e}")
-            except Exception as e:
+            except Exception:
                 logger.exception("Video processing failed")
-                st.error(f"❌ Something went wrong while processing this video: {e}")
+                st.error("❌ Something went wrong while processing this video. Please try again.")
 
 with tab_upload:
     uploaded_file = st.file_uploader(
@@ -234,20 +265,33 @@ with tab_upload:
                 st.rerun()
             except IngestionError as e:
                 st.error(f"❌ {e}")
-            except Exception as e:
+            except Exception:
                 logger.exception("Upload processing failed")
-                st.error(f"❌ Something went wrong while processing this file: {e}")
+                st.error("❌ Something went wrong while processing this file. Please try again.")
 
 # ------------------------------------------------------------------ Notes --
 if st.session_state.current_notes:
     st.subheader(f"📝 Notes — {st.session_state.current_title}")
     st.markdown(st.session_state.current_notes)
-    st.download_button(
-        "⬇️ Download notes (.md)",
-        data=st.session_state.current_notes,
-        file_name=f"{st.session_state.current_title or 'notes'}.md",
-        mime="text/markdown",
-    )
+
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            "⬇️ Download notes (.md)",
+            data=st.session_state.current_notes,
+            file_name=f"{st.session_state.current_title or 'notes'}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+    with dl_col2:
+        if st.session_state.current_transcript:
+            st.download_button(
+                "⬇️ Download transcript (.txt)",
+                data=st.session_state.current_transcript,
+                file_name=f"{st.session_state.current_title or 'transcript'}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
 
 # -------------------------------------------------------------------- Q&A --
 has_library = bool(sources)
@@ -279,46 +323,39 @@ if st.session_state.current_source_id or has_library:
             st.write(turn["question"])
         with st.chat_message("assistant"):
             st.write(turn["answer"])
-            with st.expander("📌 Sources used"):
-                for i, chunk in enumerate(turn["sources"], start=1):
-                    title = chunk.get("title") or chunk.get("video_id", "unknown")
-
-                    position = None
-                    if chunk.get("start") is not None and chunk.get("end") is not None:
-                        position = f"`{chunk['start']}s → {chunk['end']}s`"
-                    elif chunk.get("page") is not None:
-                        position = f"page {chunk['page']}"
-
-                    header = f"**Source {i}** — {title}" + (f" · {position}" if position else "")
-
-                    ts_link = None
-                    if (
-                        chunk.get("source_type") == "youtube_video"
-                        and chunk.get("video_id")
-                        and chunk.get("start") is not None
-                    ):
-                        ts_link = f"https://www.youtube.com/watch?v={chunk['video_id']}&t={int(chunk['start'])}s"
-
-                    st.markdown(f"{header} · [open ▶]({ts_link})" if ts_link else header)
-                    st.caption(chunk["text"])
+            _render_sources(turn["sources"])
 
     question = st.chat_input(
         "Ask a question..." if scope == "current" else "Ask a question across your library..."
     )
     if question:
         try:
-            with st.spinner("Searching and generating answer..."):
+            with st.status("Answering...", expanded=False) as qa_status:
+                qa_status.write("🔎 Retrieving relevant context...")
                 query_embedding = embed_query(question)
                 top_chunks = retrieve(
                     question, query_embedding, video_id=scope_source_id, top_k=config.RAG_TOP_K
                 )
                 history_pairs = [(t["question"], t["answer"]) for t in st.session_state.chat_history]
-                answer = answer_question(question, top_chunks, chat_history=history_pairs)
+
+                if top_chunks:
+                    qa_status.write(f"📚 Found {len(top_chunks)} relevant passage(s)")
+                    qa_status.write("🤖 Generating a grounded answer...")
+                else:
+                    qa_status.write("🤷 No relevant context found in this scope")
+
+                answer = rag_chat.answer_question(question, top_chunks, chat_history=history_pairs)
+                cited_sources = rag_chat.extract_cited_sources(answer, top_chunks)
+
+                qa_status.update(
+                    label="Answer ready" if top_chunks else "No relevant context found",
+                    state="complete",
+                )
 
             st.session_state.chat_history.append(
-                {"question": question, "answer": answer, "sources": top_chunks}
+                {"question": question, "answer": answer, "sources": cited_sources}
             )
             st.rerun()
-        except Exception as e:
+        except Exception:
             logger.exception("Q&A failed")
-            st.error(f"❌ Something went wrong answering that question: {e}")
+            st.error("❌ Something went wrong while answering that question. Please try again.")

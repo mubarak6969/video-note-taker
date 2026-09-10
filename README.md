@@ -30,7 +30,11 @@ Audio/video ──── Whisper ─────────────┘     
                                                            ▼
                                                 rerank → top-k chunks
                                                            ▼
-                                          Groq → grounded, cited answer
+                                    Groq → answer, grounded + cited per claim
+                                                           ▼
+                                extract_cited_sources() → concise "Sources" panel
+                                     (only the evidence actually used, each with
+                                      title + timestamp/page + clickable link)
 ```
 
 - **Ingest**: [`src/ingestion/`](src/ingestion/) converts any source - a
@@ -49,8 +53,13 @@ Audio/video ──── Whisper ─────────────┘     
   - Uploads are identified by a **content hash**, not filename, so
     re-uploading the same file (even renamed) is recognized as a
     duplicate and skipped instead of reprocessed.
-- **Notes**: the source's text is sent to Groq to produce structured notes
-  (key points, timestamp/page references, action items).
+- **Notes**: [`src/notes_generator.py`](src/notes_generator.py) sends the
+  source's text to Groq to produce study-quality structured notes with
+  five fixed sections - **Overview**, **Key Concepts**, **Important
+  Points**, **Actionable Takeaways**, **Source References** - each
+  referencing timestamps or page numbers where the source has them, and
+  worded for what the source actually is (a PDF gets "page" language, a
+  video gets timestamps, plain text gets neither).
 - **Chunk + embed**: time-based sources get overlapping ~30s chunks
   ([`chunker.chunk_segments`](src/chunker.py)); page/text sources get
   overlapping character-based chunks ([`chunker.chunk_pages`](src/chunker.py)/
@@ -72,6 +81,13 @@ Audio/video ──── Whisper ─────────────┘     
 - **Ask**: [`src/rag_chat.py`](src/rag_chat.py) answers strictly from the
   retrieved chunks, citing each claim by a `(Source N, timestamp-or-page)`
   label, and says so plainly when the context isn't enough to answer.
+  Recent conversation turns are passed along too, so a follow-up like
+  "what about its byproduct?" resolves against the prior question.
+  `extract_cited_sources()` then parses which `Source N` labels the
+  answer actually used and maps them back to the real chunk metadata -
+  the UI's "Sources" panel shows only that evidence (title, timestamp-or-
+  page, and a clickable YouTube deep link where applicable), not every
+  chunk that was merely retrieved.
 
 ## Setup
 
@@ -107,6 +123,40 @@ The `src/test_*.py` scripts are manual smoke tests that hit the real
 network and a real Groq API key — run them individually with
 `python src/test_download.py` etc. when you want to sanity-check the
 full pipeline against a live video.
+
+## RAG evaluation
+
+[`tests/evaluation/`](tests/evaluation/) is a small, deterministic RAG
+quality suite - it runs as part of the normal `pytest` run above, not as
+a separate tool. It seeds a hand-written 3-source corpus (a YouTube-style
+video, a PDF, and a text doc - [`golden_dataset.py`](tests/evaluation/golden_dataset.py))
+through the **real** embedding model, ChromaDB, hybrid retrieval, and
+reranker - only the Groq call is ever mocked, and only for the two checks
+that inherently need it (see below). Nothing here costs an API call or a
+network round-trip.
+
+Eight golden questions cover the categories that matter for RAG quality:
+
+| Category | What it checks |
+|---|---|
+| `exact_keyword` | An exact code/number is retrieved even from a whole-corpus BM25+vector search |
+| `semantic` | A paraphrased question with **no keyword overlap** still retrieves the right chunk via embeddings |
+| `cross_source` | A library-wide question retrieves evidence from more than one source |
+| `source_attribution` | Retrieved chunks carry the correct title/source_type, and `describe_source()` renders them correctly |
+| `insufficient_context` | A question scoped to an unprocessed source returns `[]` and the canned fallback **without calling the LLM** (asserted by making the mock raise if called) |
+| `follow_up` | A pronoun-only follow-up ("what about its byproduct?") still retrieves the right chunk, and the prior Q/A pair is verified present in the constructed prompt (LLM mocked to capture the prompt, not to grade its reply) |
+
+A final `test_overall_retrieval_hit_rate_meets_quality_gate` test computes
+a hit-rate across every retrieval-graded question and asserts it stays
+at or above 90% - a concrete, re-runnable regression gate for chunking/
+embedding/retrieval-setting changes, not just a pass/fail per question.
+
+This intentionally does **not** grade the LLM's prose (that would need a
+live call and a judge model - out of scope for a free, deterministic,
+CI-friendly suite); it grades the parts of the pipeline that are
+deterministic and that the LLM's answer quality depends on: did
+retrieval find the right evidence, is it correctly attributed, and does
+the prompt actually carry that evidence and conversation history.
 
 ## Configuration
 
@@ -166,15 +216,19 @@ src/
   retrieval.py            hybrid (vector + BM25) candidate retrieval
   reranker.py             reranks candidates → final top-k chunks
   text_utils.py           shared tokenizer for keyword search/reranking
-  notes_generator.py     source text → structured notes (Groq)
-  rag_chat.py             grounded, cited question answering (Groq)
+  notes_generator.py     source text → structured 5-section notes (Groq)
+  rag_chat.py             grounded, cited Q&A + citation extraction (Groq)
   llm_client.py           shared Groq client, retries, key validation
 tests/                  fast unit tests (mocked)
+  evaluation/              deterministic RAG quality suite (see above)
 ```
 
 Downloaded/uploaded audio lives in `downloads/` (uploads under
-`downloads/uploads/`), and persisted notes/embeddings/library index live
-in `data/` — both are git-ignored.
+`downloads/uploads/`), and persisted notes/embeddings/library index/raw
+transcripts live in `data/` (`chroma_db/`, `library.json`, `notes/`,
+`transcripts/`) — both directories are git-ignored. Both the generated
+notes and the raw extracted/transcribed text are downloadable from the
+UI once a source is open.
 
 ### Adding a new source type
 

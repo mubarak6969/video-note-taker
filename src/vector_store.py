@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 CHROMA_DIR = os.path.join(config.DATA_DIR, "chroma_db")
 LIBRARY_PATH = os.path.join(config.DATA_DIR, "library.json")
 NOTES_DIR = os.path.join(config.DATA_DIR, "notes")
+TRANSCRIPTS_DIR = os.path.join(config.DATA_DIR, "transcripts")
 
 os.makedirs(CHROMA_DIR, exist_ok=True)
 os.makedirs(NOTES_DIR, exist_ok=True)
+os.makedirs(TRANSCRIPTS_DIR, exist_ok=True)
 
 _client = chromadb.PersistentClient(path=CHROMA_DIR)
 _collection = _client.get_or_create_collection(
@@ -86,6 +88,16 @@ def load_notes(source_id: str):
     return None
 
 
+def load_transcript(source_id: str):
+    """Returns the raw extracted/transcribed text for a source, or None if
+    it wasn't saved (e.g. a source processed before this existed)."""
+    transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{source_id}.txt")
+    if os.path.exists(transcript_path):
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            return f.read()
+    return None
+
+
 def save_source(
     source_id: str,
     title: str,
@@ -93,6 +105,7 @@ def save_source(
     notes: str,
     chunks: list,
     source_type: str = "youtube_video",
+    full_text: str = None,
 ):
     """Persists a processed source's chunks (with embeddings), notes, and
     library metadata. Safe to call again for the same source_id (replaces
@@ -145,6 +158,11 @@ def save_source(
     with open(notes_path, "w", encoding="utf-8") as f:
         f.write(notes)
 
+    if full_text:
+        transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{source_id}.txt")
+        with open(transcript_path, "w", encoding="utf-8") as f:
+            f.write(full_text)
+
     library = [v for v in _load_library() if _entry_id(v) != source_id]
     library.insert(0, {
         "video_id": source_id,
@@ -158,9 +176,17 @@ def save_source(
     logger.info("Saved source '%s' (%s, %s) with %d chunks.", title, source_id, source_type, len(chunks))
 
 
-def save_video(video_id: str, title: str, url: str, notes: str, chunks: list, source_type: str = "youtube_video"):
+def save_video(
+    video_id: str,
+    title: str,
+    url: str,
+    notes: str,
+    chunks: list,
+    source_type: str = "youtube_video",
+    full_text: str = None,
+):
     """Backward-compatible alias for save_source()."""
-    return save_source(video_id, title, url, notes, chunks, source_type=source_type)
+    return save_source(video_id, title, url, notes, chunks, source_type=source_type, full_text=full_text)
 
 
 def delete_source(source_id: str):
@@ -168,6 +194,9 @@ def delete_source(source_id: str):
     notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
     if os.path.exists(notes_path):
         os.remove(notes_path)
+    transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{source_id}.txt")
+    if os.path.exists(transcript_path):
+        os.remove(transcript_path)
     _save_library([v for v in _load_library() if _entry_id(v) != source_id])
     logger.info("Deleted source %s from the library.", source_id)
 
