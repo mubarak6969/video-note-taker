@@ -3,3 +3,7 @@ venv/
 __pycache__/
 *.pyc
 downloads/
+cookies.txt
+data/
+.pytest_cache/
+report.html

@@ -1,31 +1,40 @@
-def chunk_segments(segments, chunk_duration=30):
+def chunk_segments(segments, chunk_duration=30, overlap=5):
     """
-    Groups Whisper segments into chunks based on time duration.
-    Each chunk = ~30 seconds of speech combined into one block of text.
+    Groups Whisper segments into time-based chunks of ~chunk_duration seconds.
+
+    Consecutive chunks share `overlap` seconds of trailing context so a
+    sentence or idea that straddles a chunk boundary isn't split away from
+    its context in both halves - this measurably improves retrieval quality
+    for RAG search.
     """
+    if not segments:
+        return []
+
     chunks = []
-    current_chunk_text = ""
-    chunk_start_time = segments[0]["start"]
-    
+    window = []
+    window_start = segments[0]["start"]
+
     for segment in segments:
-        current_chunk_text += segment["text"] + " "
-        
-        # If this chunk has covered enough duration, save it and start a new one
-        if segment["end"] - chunk_start_time >= chunk_duration:
+        window.append(segment)
+
+        if segment["end"] - window_start >= chunk_duration:
             chunks.append({
-                "text": current_chunk_text.strip(),
-                "start": chunk_start_time,
-                "end": segment["end"]
+                "text": " ".join(s["text"].strip() for s in window).strip(),
+                "start": window_start,
+                "end": segment["end"],
             })
-            current_chunk_text = ""
-            chunk_start_time = segment["end"]
-    
-    # Add any leftover text as the final chunk
-    if current_chunk_text.strip():
+
+            # Keep the trailing `overlap` seconds of segments as the start
+            # of the next window instead of discarding them.
+            cutoff = segment["end"] - overlap
+            window = [s for s in window if s["end"] > cutoff]
+            window_start = window[0]["start"] if window else segment["end"]
+
+    if window:
         chunks.append({
-            "text": current_chunk_text.strip(),
-            "start": chunk_start_time,
-            "end": segments[-1]["end"]
+            "text": " ".join(s["text"].strip() for s in window).strip(),
+            "start": window_start,
+            "end": segments[-1]["end"],
         })
-    
+
     return chunks

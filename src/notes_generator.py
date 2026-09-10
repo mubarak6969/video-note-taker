@@ -1,29 +1,25 @@
-from groq import Groq
-import os
-from dotenv import load_dotenv
+import logging
 
-load_dotenv()
+import config
+from llm_client import chat_completion
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+logger = logging.getLogger(__name__)
+
 
 def generate_notes(transcript, segments):
-    print("🤖 Sending transcript to Groq...")
-    
-    # Format timestamps from segments
-    timestamps = ""
-    for segment in segments:
-        start = round(segment["start"], 2)
-        text = segment["text"]
-        timestamps += f"[{start}s]: {text}\n"
-    
-    # The prompt we send to the LLM
+    logger.info("Generating notes via Groq (%d segments)", len(segments))
+
+    # The timestamped text below already contains the full transcript, so we
+    # don't send the plain `transcript` string too - the original prompt did,
+    # roughly doubling token usage/cost for no benefit.
+    timestamps = "\n".join(
+        f"[{round(segment['start'], 2)}s]: {segment['text'].strip()}" for segment in segments
+    )
+
     prompt = f"""
 You are a helpful assistant that creates structured notes from video transcripts.
 
-Here is the full transcript:
-{transcript}
-
-Here are the timestamps:
+Here is the transcript with timestamps:
 {timestamps}
 
 Please provide:
@@ -31,16 +27,9 @@ Please provide:
 2. KEY TIMESTAMPS: Most important moments with their times
 3. ACTION ITEMS: Things to do or remember from this video
 
-Format your response clearly with these 3 sections.
+Format your response clearly with these 3 sections, using Markdown.
 """
-    
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
-    
-    notes = response.choices[0].message.content
-    print("✅ Notes generated!")
+
+    notes = chat_completion(prompt, model=config.GROQ_MODEL)
+    logger.info("Notes generated (%d chars)", len(notes))
     return notes
