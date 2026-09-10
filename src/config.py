@@ -9,9 +9,18 @@ import os
 # Whisper transcription
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 
-# Chunking
+# Chunking - time-based (YouTube / audio-video uploads)
 CHUNK_DURATION_SECONDS = int(os.getenv("CHUNK_DURATION_SECONDS", "30"))
 CHUNK_OVERLAP_SECONDS = int(os.getenv("CHUNK_OVERLAP_SECONDS", "5"))
+
+# Chunking - character-based (PDF / text uploads, no natural timestamps)
+CHUNK_MAX_CHARS = int(os.getenv("CHUNK_MAX_CHARS", "1200"))
+CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "150"))
+
+# Uploads - per-type size ceilings, enforced by src/ingestion/*.
+UPLOAD_MAX_PDF_MB = int(os.getenv("UPLOAD_MAX_PDF_MB", "25"))
+UPLOAD_MAX_TEXT_MB = int(os.getenv("UPLOAD_MAX_TEXT_MB", "5"))
+UPLOAD_MAX_AUDIO_MB = int(os.getenv("UPLOAD_MAX_AUDIO_MB", "200"))
 
 # Retrieval
 # RAG_TOP_K: final number of chunks handed to the LLM as context.

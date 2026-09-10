@@ -43,95 +43,149 @@ def _save_library(library):
         json.dump(library, f, indent=2, ensure_ascii=False)
 
 
+def _entry_id(entry: dict):
+    """A library entry's id, reading the newer 'source_id' key with a
+    fallback to the original 'video_id' key so entries written before this
+    field existed still resolve correctly."""
+    return entry.get("source_id") or entry.get("video_id")
+
+
+def source_exists(source_id: str) -> bool:
+    """True if a source (of any type - video, PDF, text, audio upload)
+    with this id has already been processed and saved."""
+    return any(_entry_id(v) == source_id for v in _load_library())
+
+
 def video_exists(video_id: str) -> bool:
-    return any(v["video_id"] == video_id for v in _load_library())
+    """Backward-compatible alias for source_exists()."""
+    return source_exists(video_id)
 
 
-def list_videos():
-    """Returns the video library, most recently processed first."""
+def list_sources():
+    """Returns the whole library (every source type), most recently
+    processed first."""
     return _load_library()
 
 
-def load_notes(video_id: str):
-    notes_path = os.path.join(NOTES_DIR, f"{video_id}.md")
+def list_videos():
+    """Backward-compatible alias for list_sources()."""
+    return list_sources()
+
+
+def get_source(source_id: str):
+    """Returns the library entry for one source, or None if it hasn't been
+    processed."""
+    return next((v for v in _load_library() if _entry_id(v) == source_id), None)
+
+
+def load_notes(source_id: str):
+    notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
     if os.path.exists(notes_path):
         with open(notes_path, "r", encoding="utf-8") as f:
             return f.read()
     return None
 
 
-def save_video(
-    video_id: str,
+def save_source(
+    source_id: str,
     title: str,
-    url: str,
+    origin: str,
     notes: str,
     chunks: list,
     source_type: str = "youtube_video",
 ):
-    """Persists a processed video's chunks (with embeddings), notes, and
-    library metadata. Safe to call again for the same video_id (replaces
+    """Persists a processed source's chunks (with embeddings), notes, and
+    library metadata. Safe to call again for the same source_id (replaces
     the old data).
 
+    Works uniformly for every source type ingested via src/ingestion/ -
+    YouTube videos, PDF/text uploads, audio/video uploads. Each chunk may
+    carry 'start'/'end' (time-based sources) and/or 'page' (page-based
+    sources, e.g. PDF); whichever aren't applicable are simply omitted
+    from that chunk's stored metadata rather than written as None, since
+    Chroma metadata values must be str/int/float/bool.
+
+    `origin` is the source's URL (YouTube) or original filename (uploads).
     `source_type` is stored on every chunk and in the library entry, so
-    retrieval results always carry it - a hook for later ingesting other
-    kinds of sources (documents, articles, ...) into the same library
-    without changing the retrieval/answer code.
+    retrieval results always know what kind of source they came from.
     """
     if not chunks:
-        raise ValueError("Cannot save a video with no chunks.")
+        raise ValueError("Cannot save a source with no chunks.")
 
-    ids = [f"{video_id}_{i}" for i in range(len(chunks))]
+    ids = [f"{source_id}_{i}" for i in range(len(chunks))]
     documents = [c["text"] for c in chunks]
     embeddings = [
         c["embedding"].tolist() if hasattr(c["embedding"], "tolist") else list(c["embedding"])
         for c in chunks
     ]
-    metadatas = [
-        {
-            "video_id": video_id,
+    metadatas = []
+    for c in chunks:
+        meta = {
+            # Both keys are written for every new chunk: 'video_id' so
+            # rows saved by earlier versions of this app stay queryable
+            # under the same field name, 'source_id' as the clearer name
+            # non-video ingestion code should prefer going forward.
+            "video_id": source_id,
+            "source_id": source_id,
             "title": title,
-            "start": c["start"],
-            "end": c["end"],
             "source_type": source_type,
         }
-        for c in chunks
-    ]
+        if c.get("start") is not None:
+            meta["start"] = c["start"]
+        if c.get("end") is not None:
+            meta["end"] = c["end"]
+        if c.get("page") is not None:
+            meta["page"] = c["page"]
+        metadatas.append(meta)
 
-    _collection.delete(where={"video_id": video_id})
+    _collection.delete(where={"video_id": source_id})
     _collection.add(ids=ids, documents=documents, embeddings=embeddings, metadatas=metadatas)
 
-    notes_path = os.path.join(NOTES_DIR, f"{video_id}.md")
+    notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
     with open(notes_path, "w", encoding="utf-8") as f:
         f.write(notes)
 
-    library = [v for v in _load_library() if v["video_id"] != video_id]
+    library = [v for v in _load_library() if _entry_id(v) != source_id]
     library.insert(0, {
-        "video_id": video_id,
+        "video_id": source_id,
+        "source_id": source_id,
         "title": title,
-        "url": url,
+        "url": origin,
         "source_type": source_type,
         "processed_at": datetime.now(timezone.utc).isoformat(),
     })
     _save_library(library)
-    logger.info("Saved video '%s' (%s) with %d chunks.", title, video_id, len(chunks))
+    logger.info("Saved source '%s' (%s, %s) with %d chunks.", title, source_id, source_type, len(chunks))
+
+
+def save_video(video_id: str, title: str, url: str, notes: str, chunks: list, source_type: str = "youtube_video"):
+    """Backward-compatible alias for save_source()."""
+    return save_source(video_id, title, url, notes, chunks, source_type=source_type)
+
+
+def delete_source(source_id: str):
+    _collection.delete(where={"video_id": source_id})
+    notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
+    if os.path.exists(notes_path):
+        os.remove(notes_path)
+    _save_library([v for v in _load_library() if _entry_id(v) != source_id])
+    logger.info("Deleted source %s from the library.", source_id)
 
 
 def delete_video(video_id: str):
-    _collection.delete(where={"video_id": video_id})
-    notes_path = os.path.join(NOTES_DIR, f"{video_id}.md")
-    if os.path.exists(notes_path):
-        os.remove(notes_path)
-    _save_library([v for v in _load_library() if v["video_id"] != video_id])
-    logger.info("Deleted video %s from the library.", video_id)
+    """Backward-compatible alias for delete_source()."""
+    return delete_source(video_id)
 
 
 def _chunk_from_metadata(doc_id: str, doc: str, meta: dict) -> dict:
     return {
         "id": doc_id,
         "text": doc,
-        "start": meta["start"],
-        "end": meta["end"],
-        "video_id": meta.get("video_id"),
+        "start": meta.get("start"),
+        "end": meta.get("end"),
+        "page": meta.get("page"),
+        "video_id": meta.get("video_id") or meta.get("source_id"),
+        "source_id": meta.get("source_id") or meta.get("video_id"),
         "title": meta.get("title", ""),
         "source_type": meta.get("source_type", "youtube_video"),
     }

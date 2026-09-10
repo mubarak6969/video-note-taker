@@ -38,3 +38,55 @@ def chunk_segments(segments, chunk_duration=30, overlap=5):
         })
 
     return chunks
+
+
+def chunk_text_by_chars(text, max_chars=1200, overlap_chars=150, page=None):
+    """
+    Splits plain text into overlapping chunks by character count, breaking
+    on a word boundary where possible.
+
+    Used for non-timed sources (PDF pages, text file uploads) where the
+    time-based chunk_segments() above doesn't apply - there is no
+    start/end, only an optional page number. `page`, if given, is stamped
+    onto every resulting chunk so citations can point back to it.
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    spans = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + max_chars, n)
+        if end < n:
+            split_at = text.rfind(" ", start, end)
+            if split_at > start:
+                end = split_at
+        spans.append((start, end))
+        if end >= n:
+            break
+        start = max(end - overlap_chars, start + 1)
+
+    chunks = []
+    for span_start, span_end in spans:
+        chunk_text = text[span_start:span_end].strip()
+        if chunk_text:
+            chunks.append({"text": chunk_text, "start": None, "end": None, "page": page})
+    return chunks
+
+
+def chunk_pages(pages, max_chars=1200, overlap_chars=150):
+    """
+    Chunks a list of {"page": int, "text": str} entries (e.g. extracted PDF
+    pages) into overlapping character-based chunks, each stamped with the
+    page number it came from.
+    """
+    chunks = []
+    for entry in pages:
+        chunks.extend(
+            chunk_text_by_chars(
+                entry["text"], max_chars=max_chars, overlap_chars=overlap_chars, page=entry.get("page")
+            )
+        )
+    return chunks
