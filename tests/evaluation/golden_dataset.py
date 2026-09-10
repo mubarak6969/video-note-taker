@@ -92,6 +92,15 @@ GOLDEN_QUESTIONS = [
         "scope_source_id": "a_source_id_that_was_never_processed",
     },
     {
+        "id": "insufficient_context_off_topic_within_processed_source",
+        "category": "insufficient_context",
+        # eval_pdf_1 exists and has chunks - unlike the case above, this
+        # tests the relevance *gate*, not an empty pool: pre-gate, this
+        # question would have returned the "least bad" PDF chunks anyway.
+        "question": "What is the capital of France?",
+        "scope_source_id": "eval_pdf_1",
+    },
+    {
         "id": "followup_photosynthesis_byproduct",
         "category": "follow_up",
         "question": "What about its byproduct?",

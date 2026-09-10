@@ -67,10 +67,12 @@ def hybrid_search(
     by_id = {c["id"]: c for c in pool}
 
     vector_ranks = {}
+    vector_similarities = {}
     if mode in ("hybrid", "vector"):
         vhits = vector_store.vector_search_raw(query_embedding, video_id, top_k=candidate_count)
         for rank, hit in enumerate(vhits, start=1):
             vector_ranks[hit["id"]] = rank
+            vector_similarities[hit["id"]] = hit["similarity"]
 
     keyword_ranks = {}
     if mode in ("hybrid", "keyword"):
@@ -93,9 +95,17 @@ def hybrid_search(
         candidate = {
             **base,
             # RRF-derived scores, normalized to a 0-1-ish range for the
-            # reranker: best possible rank (#1) scores 1/(k+1).
+            # reranker: best possible rank (#1) scores 1/(k+1). These
+            # reflect rank position among this query's own candidates,
+            # not absolute relevance - see 'vector_similarity' below.
             "vector_score": (1.0 / (k + v_rank)) * (k + 1) if v_rank else 0.0,
             "keyword_score": (1.0 / (k + kw_rank)) * (k + 1) if kw_rank else 0.0,
+            # Raw cosine similarity (0-1, magnitude-based - not rank-
+            # based), kept alongside the RRF scores above specifically so
+            # reranker.py can build a genuine relevance/confidence signal
+            # for the insufficient-context gate, independent of how many
+            # other candidates happened to be in this query's pool.
+            "vector_similarity": vector_similarities.get(cid, 0.0),
         }
         candidates.append(candidate)
 
@@ -113,13 +123,21 @@ def retrieve(
     candidate_count: int = None,
     mode: str = None,
     rerank_method: str = None,
+    min_relevance: float = None,
 ):
     """The single entry point the app uses for Q&A retrieval: hybrid search
     followed by reranking. Set video_id=None to search the whole library
-    instead of one video."""
+    instead of one video.
+
+    `min_relevance` (defaults to config.RAG_RELEVANCE_THRESHOLD) drops
+    candidates whose evidence is too weak to trust - see reranker.rerank().
+    A question whose best evidence doesn't clear the bar comes back as []
+    here, which app.py and rag_chat.answer_question() already treat as
+    "insufficient context" rather than a retrieval failure.
+    """
     candidates = hybrid_search(
         query, query_embedding, video_id=video_id, candidate_count=candidate_count, mode=mode
     )
     if not candidates:
         return []
-    return rerank(query, candidates, top_k=top_k, method=rerank_method)
+    return rerank(query, candidates, top_k=top_k, method=rerank_method, min_relevance=min_relevance)

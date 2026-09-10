@@ -53,6 +53,22 @@ RERANK_WEIGHT_EXACT = float(os.getenv("RERANK_WEIGHT_EXACT", "0.20"))
 # default from the original RRF paper and needs no tuning in practice.
 HYBRID_RRF_K = int(os.getenv("HYBRID_RRF_K", "60"))
 
+# Relevance gate - applied after reranking (heuristic/cross_encoder methods
+# only; "none" has no meaningful score to gate on and passes through
+# untouched). Each candidate's relevance_score blends raw semantic
+# similarity with exact keyword overlap - see reranker.py - and is
+# deliberately NOT the same as rerank_score, which also factors in RRF
+# rank position and exists only to pick a display order; rank position
+# alone can't tell "genuinely relevant" from "the least-bad of a weak
+# field," which is exactly what this threshold is for.
+#
+# A candidate below this threshold is dropped as too weak to count as
+# real evidence. If every candidate for a query drops, retrieve() returns
+# [] and the app treats the question as having insufficient context
+# rather than asking the LLM to answer from thin material. Set to 0 to
+# disable the gate entirely (restores pre-gate behavior).
+RAG_RELEVANCE_THRESHOLD = float(os.getenv("RAG_RELEVANCE_THRESHOLD", "0.30"))
+
 # LLM
 # Groq periodically retires model IDs; "llama-3.3-70b-versatile" (the
 # original default) returns 404 "model_not_found" as of this change.

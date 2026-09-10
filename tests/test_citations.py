@@ -75,6 +75,30 @@ def test_extract_cited_sources_empty_chunks_returns_empty_list():
     assert rag_chat.extract_cited_sources("(Source 1)", []) == []
 
 
+def test_describe_source_ignores_hallucinated_title_and_position_in_answer_text():
+    """Attribution must come from retrieved chunk metadata, never from
+    whatever the model's prose happens to say - an LLM can misstate a
+    title or position (or invent one entirely) in its answer text, but
+    describe_source() only ever reads the real chunk it was given."""
+    chunk = {
+        "start": 15,
+        "end": 35,
+        "title": "New Employee Orientation",
+        "video_id": "smoke_yt_1",
+        "source_type": "youtube_video",
+    }
+    # The model's answer wrongly claims "page 4" and a different title -
+    # describe_source() never even sees the answer text, only the chunk.
+    hallucinated_answer = "Per 'Company Handbook' (Source 1, page 4), employees get 24 days of leave."
+
+    cited = rag_chat.extract_cited_sources(hallucinated_answer, [chunk])
+    info = rag_chat.describe_source(cited[0])
+
+    assert info["title"] == "New Employee Orientation"
+    assert info["position"] == "0:15-0:35"
+    assert info["link"] == "https://www.youtube.com/watch?v=smoke_yt_1&t=15s"
+
+
 def test_answer_question_prompt_instructs_citation_and_grounding_and_followups():
     captured = {}
 
