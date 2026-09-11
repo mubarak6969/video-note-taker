@@ -1,5 +1,7 @@
 venv/
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 downloads/
@@ -7,3 +9,9 @@ cookies.txt
 data/
 .pytest_cache/
 report.html
+.streamlit/secrets.toml
+*.log
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db

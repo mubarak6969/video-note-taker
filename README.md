@@ -169,7 +169,9 @@ LLM call.
 ## Setup
 
 1. Install [ffmpeg](https://ffmpeg.org/) and make sure it's on your `PATH`
-   (required by yt-dlp/Whisper for audio extraction).
+   (required by yt-dlp/Whisper for audio extraction, and by `ffprobe` -
+   bundled with every standard ffmpeg install - for the duration cap in
+   `src/media_probe.py`).
 2. Create a virtual environment and install dependencies:
    ```bash
    python -m venv venv
@@ -335,7 +337,10 @@ for a product with real, separate user accounts.
 The repo is already shaped for it - `requirements.txt` (pinned) and
 `packages.txt` (`ffmpeg`, installed via `apt-get` at build time) are
 exactly Streamlit Cloud's native reproducibility mechanism, so no
-Dockerfile or build script is needed. Steps:
+Dockerfile or build script is needed. `packages.txt` lists only `ffmpeg`
+deliberately - on Debian/Ubuntu (what Streamlit Cloud builds on) the
+`ffmpeg` apt package already bundles `ffprobe`, and there is no separate
+`ffprobe` apt package to add - listing one would fail the build. Steps:
 
 1. Push this repo to GitHub.
 2. On [share.streamlit.io](https://share.streamlit.io), create a new app
