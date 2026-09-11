@@ -4,12 +4,16 @@ import os
 import pytest
 
 
-def _fresh_audio_source(tmp_path, monkeypatch, fake_transcribe=None, max_audio_mb=None):
+def _fresh_audio_source(
+    tmp_path, monkeypatch, fake_transcribe=None, max_audio_mb=None, max_audio_minutes=None, fake_duration=None
+):
     monkeypatch.setenv("DOWNLOADS_DIR", str(tmp_path / "downloads"))
     monkeypatch.setenv("CHUNK_DURATION_SECONDS", "30")
     monkeypatch.setenv("CHUNK_OVERLAP_SECONDS", "5")
     if max_audio_mb is not None:
         monkeypatch.setenv("UPLOAD_MAX_AUDIO_MB", str(max_audio_mb))
+    if max_audio_minutes is not None:
+        monkeypatch.setenv("UPLOAD_MAX_AUDIO_MINUTES", str(max_audio_minutes))
     import config
 
     importlib.reload(config)
@@ -19,6 +23,10 @@ def _fresh_audio_source(tmp_path, monkeypatch, fake_transcribe=None, max_audio_m
 
     if fake_transcribe is not None:
         monkeypatch.setattr(audio_source, "transcribe_audio", fake_transcribe)
+    # Default: pretend ffprobe is unavailable (None) unless a test wants a
+    # specific duration - matches "skip the check rather than block" in
+    # environments without ffmpeg, and keeps every other test unaffected.
+    monkeypatch.setattr(audio_source, "get_duration_seconds", lambda path: fake_duration)
     return audio_source
 
 
@@ -89,3 +97,38 @@ def test_ingest_audio_upload_reuses_stored_file_for_identical_bytes(tmp_path, mo
 
     # Same content -> same source_id -> same stored path both times.
     assert calls[0] == calls[1]
+
+
+def test_ingest_audio_upload_rejects_file_over_duration_cap(tmp_path, monkeypatch):
+    def must_not_be_called(*a, **k):
+        raise AssertionError("transcribe_audio should not run once the duration cap rejects the file")
+
+    audio_source = _fresh_audio_source(
+        tmp_path, monkeypatch, must_not_be_called, max_audio_minutes=10, fake_duration=15 * 60
+    )
+    from ingestion.errors import IngestionError
+
+    with pytest.raises(IngestionError, match="minutes long"):
+        audio_source.ingest_audio_upload(b"long audio bytes", "long.mp3")
+
+
+def test_ingest_audio_upload_allows_file_under_duration_cap(tmp_path, monkeypatch):
+    calls = []
+    audio_source = _fresh_audio_source(
+        tmp_path, monkeypatch, _default_fake_transcribe(calls), max_audio_minutes=10, fake_duration=5 * 60
+    )
+    source = audio_source.ingest_audio_upload(b"short audio bytes", "short.mp3")
+    assert source.source_type == "audio_upload"
+    assert calls
+
+
+def test_ingest_audio_upload_proceeds_when_duration_is_unknown(tmp_path, monkeypatch):
+    """ffprobe being unavailable/failing must not block ingestion - the
+    duration cap is a safety net, not a hard requirement."""
+    calls = []
+    audio_source = _fresh_audio_source(
+        tmp_path, monkeypatch, _default_fake_transcribe(calls), max_audio_minutes=10, fake_duration=None
+    )
+    source = audio_source.ingest_audio_upload(b"unknown duration bytes", "mystery.mp3")
+    assert source.source_type == "audio_upload"
+    assert calls

@@ -7,6 +7,7 @@ import os
 
 import config
 from chunker import chunk_segments
+from media_probe import get_duration_seconds
 from transcriber import transcribe_audio
 
 from .errors import IngestionError
@@ -46,6 +47,14 @@ def ingest_audio_upload(
     if not os.path.exists(stored_path):
         with open(stored_path, "wb") as f:
             f.write(file_bytes)
+
+    duration = get_duration_seconds(stored_path)
+    max_seconds = config.UPLOAD_MAX_AUDIO_MINUTES * 60
+    if duration is not None and duration > max_seconds:
+        raise IngestionError(
+            f"This file is about {duration / 60:.0f} minutes long - "
+            f"max {config.UPLOAD_MAX_AUDIO_MINUTES} minutes."
+        )
 
     transcript, raw_segments, _ = transcribe_audio(
         stored_path, language=language, model_size=model_size or config.WHISPER_MODEL_SIZE

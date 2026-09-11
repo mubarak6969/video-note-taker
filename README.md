@@ -262,6 +262,15 @@ retrieval settings below).
 | `UPLOAD_MAX_PDF_MB` | `25` | Max PDF size |
 | `UPLOAD_MAX_TEXT_MB` | `5` | Max text file size |
 | `UPLOAD_MAX_AUDIO_MB` | `200` | Max audio/video upload size |
+| `UPLOAD_MAX_AUDIO_MINUTES` | `90` | Max duration (checked via `ffprobe` after the file is on disk, before transcribing) - also applied to YouTube videos, after download but before the expensive Whisper step |
+
+**Public-access protection** (unset = open to anyone with the URL - see [Deploying publicly](#deploying-publicly)):
+
+| Variable | Default | What it does |
+|---|---|---|
+| `APP_PASSWORD` | *(unset)* | If set, gates the whole app behind this single shared password |
+| `RATE_LIMIT_INGESTIONS_PER_HOUR` | `10` | Max sources one browser session can process per hour; `0` disables |
+| `RATE_LIMIT_QUESTIONS_PER_HOUR` | `60` | Max questions one browser session can ask per hour; `0` disables |
 
 ## Supported sources
 
@@ -271,6 +280,160 @@ retrieval settings below).
 | PDF (`.pdf`) | `pypdf`, per page | `page` |
 | Text (`.txt`) | read directly | none |
 | Audio/video upload (`.mp3 .wav .m4a .mp4 .mov .webm .ogg .flac`) | Whisper | `start` / `end` (seconds) |
+
+## Security considerations
+
+This app accepts three kinds of untrusted input - a URL, an uploaded
+file, and (indirectly) whatever text ends up in a transcript/document -
+and spends real money (Groq API calls) and real compute (Whisper,
+embeddings) processing them. What's mitigated, and how:
+
+| Risk | Mitigation |
+|---|---|
+| SSRF / URL spoofing via the YouTube field | [`url_validation.is_youtube_url()`](src/url_validation.py) parses the URL and checks its actual hostname against an allowlist - not a substring match, which a URL like `https://evil.example/?next=youtube.com/watch` would slip past. Enforced twice: once in the UI for fast feedback, and again as a hard backstop inside [`downloader.download_audio()`](src/downloader.py) itself, so it can't be bypassed by any other caller. |
+| Path traversal via a source id | YouTube video ids are validated against `^[A-Za-z0-9_-]{1,32}$` right after download; every place a `source_id` becomes a filesystem path ([`vector_store.py`](src/vector_store.py)) re-validates it against the same shape before `os.path.join` ever sees it. Upload ids are SHA-256 hex hashes, which are inherently safe. |
+| Unsafe download filenames | A source's display title (from an uploaded filename or a YouTube title) is sanitized ([`ui/formatting.safe_download_filename()`](src/ui/formatting.py)) before being used as a `st.download_button` filename, stripping path separators and control characters. |
+| Oversized/malicious uploads | Per-type size ceilings (`UPLOAD_MAX_*_MB`) enforced before any parsing; a separate duration cap (`UPLOAD_MAX_AUDIO_MINUTES`, via `ffprobe`) catches a small-but-long file the size cap alone wouldn't. A maliciously-crafted PDF designed to be slow to parse (a "PDF bomb") is bounded by the size cap but not by a parse-time timeout - see Known limitations. |
+| Prompt injection from retrieved content | A transcript or document is exactly the kind of thing an attacker could seed with text like "ignore previous instructions...". The RAG prompt ([`rag_chat.py`](src/rag_chat.py)) explicitly tells the model the CONTEXT is untrusted reference material to quote/cite, never instructions to follow - see the test in `tests/test_citations.py`. |
+| XSS via LLM output or citations | Answers and citations render through `st.markdown`/Streamlit-native components only - `unsafe_allow_html` is never used anywhere in the UI, so even if a transcript (or the model echoing it) contained raw HTML/JS, Streamlit escapes it rather than executing it. |
+| Secret exposure | `GROQ_API_KEY`/`APP_PASSWORD` are read from environment/`st.secrets` only, never logged, never echoed in an error message shown to the user, and never written to a file the app itself creates. `.env`, `cookies.txt`, and `data/` are git-ignored. |
+| Corrupted local state crashing the app | A malformed `data/library.json` is caught and treated as an empty library (logged loudly server-side) rather than crashing on every page load - see `vector_store._load_library()`. |
+| No accounts / open cost exposure | This app has no user accounts. Before any public deployment, set `APP_PASSWORD` (a single shared password, `hmac.compare_digest`-compared) and the `RATE_LIMIT_*` variables - see [Deploying publicly](#deploying-publicly). |
+
+Subprocess use (`ffprobe` for duration checks; `ffmpeg`/`yt-dlp` internally
+for audio extraction) always passes arguments as a list, never a shell
+string, so there's no shell-injection surface from a filename or URL.
+
+## Deploying publicly
+
+The app has **no accounts and no per-user isolation** - it's built for a
+single owner (you) to use, not for arbitrary strangers to share. Before
+putting it on a public URL:
+
+1. Set `APP_PASSWORD` in your host's secrets/environment. Every visitor
+   sees a password prompt before anything else renders; leaving it unset
+   means anyone with the link can trigger real Whisper compute and real
+   Groq spend.
+2. Set `RATE_LIMIT_INGESTIONS_PER_HOUR` / `RATE_LIMIT_QUESTIONS_PER_HOUR`
+   to something you're comfortable paying for even if someone runs up
+   against them repeatedly (the defaults - 10 sources/hour, 60
+   questions/hour - are conservative starting points, not a hard
+   recommendation).
+3. Consider lowering `UPLOAD_MAX_AUDIO_MB`/`UPLOAD_MAX_AUDIO_MINUTES` and
+   using `WHISPER_MODEL_SIZE=base` on a free/small hosting tier - a
+   larger Whisper model or a long file can exceed typical platform
+   request-timeout limits (see Known limitations).
+
+This is a **single shared password**, not multi-user authentication -
+everyone who has it sees the same library. That's an appropriate,
+honest tradeoff for a portfolio deployment; it is not what you'd want
+for a product with real, separate user accounts.
+
+## Deployment
+
+**Recommended: [Streamlit Community Cloud](https://streamlit.io/cloud).**
+The repo is already shaped for it - `requirements.txt` (pinned) and
+`packages.txt` (`ffmpeg`, installed via `apt-get` at build time) are
+exactly Streamlit Cloud's native reproducibility mechanism, so no
+Dockerfile or build script is needed. Steps:
+
+1. Push this repo to GitHub.
+2. On [share.streamlit.io](https://share.streamlit.io), create a new app
+   pointing at `src/app.py`.
+3. In the app's **Secrets**, add `GROQ_API_KEY` (required) and, before
+   sharing the link publicly, `APP_PASSWORD` (see above). Any other
+   `.env.example` variable can go here too, using the same names.
+4. Deploy. First load is slow (downloading the Whisper and embedding
+   models); subsequent loads reuse the same container.
+
+**Alternative: [Render](https://render.com)** (or any host with a
+persistent disk), if you want your library to durably survive restarts -
+see the persistence note below. Deploy as a native Python web service
+(build command `pip install -r requirements.txt`, start command
+`streamlit run src/app.py --server.port $PORT --server.address 0.0.0.0`);
+add `ffmpeg` via Render's native/Aptfile buildpack support, or switch to
+a container deploy if you'd rather pin the OS image directly. Attach a
+persistent disk mounted at `data/` (and `downloads/` if you want cached
+audio to survive too) for durable storage.
+
+**Ruled out: Vercel** (and other edge/serverless-function platforms).
+This app needs a persistent process, not a short-lived function: Whisper
+and `sentence-transformers` are large ML dependencies that must stay
+loaded in memory across requests to be fast (the whole point of the
+model-caching in `transcriber.py`/`embedder.py`), transcription can run
+for minutes on a long file, and ChromaDB needs a real writable
+filesystem. Serverless platforms cap execution time (often 10-60s),
+cap deployment size in ways `torch`+`whisper` will blow through, and give
+each invocation a fresh, mostly-read-only filesystem - none of which
+this architecture can work around without becoming a fundamentally
+different (and much more complex) system. Streamlit Cloud/Render's
+long-running-container model is what this app actually needs.
+
+**Persistence, honestly:** ChromaDB + a JSON library index on local disk
+is the right amount of infrastructure for a single-user app - there is
+no need for a hosted database. But "local disk" means different things
+per platform: on Streamlit Community Cloud, storage can be wiped when the
+app sleeps from inactivity and wakes back up, so treat a Cloud deployment
+as a **live demo of the app's capabilities**, not a durable personal
+archive - a library built up over a session isn't guaranteed to survive
+long idle periods. Render's persistent disk (or self-hosting on a VPS)
+gives genuinely durable local storage. Neither **Supabase** nor **object
+storage (S3-compatible)** is introduced here: Supabase would only earn
+its keep with multi-user accounts and per-user data isolation, which
+this app deliberately doesn't have yet; object storage would only be
+worth the complexity on a platform with *zero* persistent filesystem
+(the class of platform already ruled out above). If durability on
+Streamlit Cloud specifically ever becomes a requirement, periodically
+syncing `data/` to S3-compatible storage is a bounded, well-understood
+next step - not something to build speculatively now.
+
+**Docker:** not included, and not required for either recommended
+platform - both consume `requirements.txt`/`packages.txt` natively, which
+already pins every Python and OS-level dependency precisely enough to
+reproduce the environment. A Dockerfile would be a reasonable addition
+if you later want to deploy to a raw VPS or a container-based host
+instead (a straightforward `python:3.11-slim` base + `apt-get install
+ffmpeg` + `pip install -r requirements.txt` would cover it) - not added
+speculatively here, since it isn't build-verified in this pass and
+neither recommended platform needs it.
+
+**Background processing:** ingestion is fully synchronous - the request
+that clicks "Process video" blocks until download, transcription,
+embedding, and note generation all finish. For this app's realistic
+single-user/portfolio traffic, a queue (Celery/RQ + Redis, or similar)
+would be meaningfully more infrastructure than the problem justifies, so
+none is introduced. The practical mitigation already in place is the
+`UPLOAD_MAX_AUDIO_MINUTES` duration cap, which bounds the worst case
+before the expensive step even starts. If this ever needs true
+background processing (e.g. because a hosting platform's request timeout
+is shorter than a real transcription job), the smallest next step is a
+background thread pool within the same process - not a distributed queue
+- escalating further only if concurrent load actually demands it.
+
+## Known limitations
+
+- **No multi-user isolation.** One shared library, one optional shared
+  password. Not a substitute for real per-user accounts.
+- **Synchronous ingestion.** A long video/audio file blocks the request
+  until it's fully transcribed; very long files may exceed a hosting
+  platform's request-timeout even with the duration cap applied.
+- **Storage durability depends on the host.** See the Persistence note
+  above - Streamlit Community Cloud's free tier is not guaranteed durable
+  across sleep/wake cycles.
+- **PDF parsing has no timeout.** The size cap (`UPLOAD_MAX_PDF_MB`)
+  bounds the worst case, but a pathologically-crafted PDF could still be
+  slow to parse; no per-file wall-clock timeout is enforced.
+- **BM25 keyword search rebuilds its index on every query**, scoped to
+  the current search (one source or the whole library). Fine at
+  portfolio scale (dozens to low hundreds of chunks); would need caching
+  or a persistent inverted index at meaningfully larger scale.
+- **No distributed rate limiting.** `RATE_LIMIT_*` is per-*browser-session*
+  in a single process - restarting the app or opening a new session
+  resets it. It's a cost safety net, not abuse-proof.
+- **`RAG_RELEVANCE_THRESHOLD=0.30` is tuned for `all-MiniLM-L6-v2`** with
+  this app's chunking. A different embedding model or very different
+  content (e.g. much longer chunks) would likely need retuning - the
+  evaluation suite (`tests/evaluation/`) is the tool to retune it with.
 
 ## Project layout
 
@@ -291,6 +454,7 @@ src/
     ingestion_ui.py          YouTube URL + Upload File tabs
     workspace.py             Notes / Source Content tabs
     chat_ui.py               Ask Questions tab: scope, history, citations
+    access_control.py        optional password gate + rate limiting (UI glue)
     constants.py             icons/labels/language list shared by the above
     formatting.py            pure display-formatting helpers
   config.py            environment-driven settings
@@ -303,6 +467,9 @@ src/
     text_source.py          text upload → IngestedSource
     audio_source.py         audio/video upload → IngestedSource (Whisper)
   downloader.py         YouTube → mp3 (yt-dlp)
+  url_validation.py      is_youtube_url() - hostname-based URL check
+  media_probe.py          ffprobe-based duration check (fails open)
+  rate_limiter.py          pure per-session rate-limit logic
   transcriber.py         mp3/audio → transcript (Whisper, cached model)
   chunker.py             time-based AND character-based chunking
   embedder.py            chunks → embeddings (sentence-transformers)

@@ -6,6 +6,17 @@ or in Streamlit secrets when deployed).
 """
 import os
 
+from dotenv import load_dotenv
+
+# Every value below is read from os.environ at *this module's* import time,
+# so .env must be loaded here, not left to whichever other module happens
+# to import first. llm_client.py also calls load_dotenv() (harmless/
+# idempotent) for the same reason in isolation - but config.py is commonly
+# the first thing other modules import, so without this call here, a value
+# like APP_PASSWORD could silently read as unset if config.py happened to
+# be imported before anything that had already loaded .env.
+load_dotenv()
+
 # Whisper transcription
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 
@@ -21,6 +32,14 @@ CHUNK_OVERLAP_CHARS = int(os.getenv("CHUNK_OVERLAP_CHARS", "150"))
 UPLOAD_MAX_PDF_MB = int(os.getenv("UPLOAD_MAX_PDF_MB", "25"))
 UPLOAD_MAX_TEXT_MB = int(os.getenv("UPLOAD_MAX_TEXT_MB", "5"))
 UPLOAD_MAX_AUDIO_MB = int(os.getenv("UPLOAD_MAX_AUDIO_MB", "200"))
+
+# Rejects audio/video whose duration exceeds this before running the
+# expensive Whisper transcription step (checked via ffprobe, which ships
+# alongside the ffmpeg dependency already required for transcription - see
+# src/media_probe.py). A large file can still be short, and a small
+# low-bitrate file can still be very long, so this is a separate cap from
+# the MB ceilings above, not a replacement for them.
+UPLOAD_MAX_AUDIO_MINUTES = int(os.getenv("UPLOAD_MAX_AUDIO_MINUTES", "90"))
 
 # Retrieval
 # RAG_TOP_K: final number of chunks handed to the LLM as context.
@@ -79,3 +98,21 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 # Storage
 DOWNLOADS_DIR = os.getenv("DOWNLOADS_DIR", "downloads")
 DATA_DIR = os.getenv("DATA_DIR", "data")
+
+# --- Public-access protection -----------------------------------------------
+# This app is single-user with no accounts, but every processed source
+# spends real Whisper compute and real Groq API quota - these two knobs are
+# the minimum protection appropriate before exposing it on a public URL.
+# Both are no-ops unless configured, so local development is unaffected.
+
+# APP_PASSWORD: if set (env var, or an APP_PASSWORD entry in Streamlit
+# secrets when deployed), the whole app is gated behind this single shared
+# password (compared with hmac.compare_digest - see src/ui/access_control.py)
+# before anything else renders. Never logged, never echoed back in the UI.
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+
+# Soft per-browser-session caps (not a substitute for the password above -
+# a cap on how much one *authenticated* session can cost). 0 disables a
+# given limit.
+RATE_LIMIT_INGESTIONS_PER_HOUR = int(os.getenv("RATE_LIMIT_INGESTIONS_PER_HOUR", "10"))
+RATE_LIMIT_QUESTIONS_PER_HOUR = int(os.getenv("RATE_LIMIT_QUESTIONS_PER_HOUR", "60"))

@@ -4,6 +4,7 @@ import streamlit as st
 
 import vector_store
 from ui.constants import SOURCE_ICONS
+from ui.formatting import safe_download_filename
 
 
 def workspace_icon() -> str:
@@ -20,7 +21,7 @@ def render_notes_tab():
     st.download_button(
         "⬇️ Download notes (.md)",
         data=st.session_state.current_notes,
-        file_name=f"{st.session_state.current_title or 'notes'}.md",
+        file_name=safe_download_filename(st.session_state.current_title, "notes", ".md"),
         mime="text/markdown",
     )
 
@@ -42,6 +43,6 @@ def render_source_content_tab():
     st.download_button(
         "⬇️ Download transcript (.txt)",
         data=transcript,
-        file_name=f"{st.session_state.current_title or 'transcript'}.txt",
+        file_name=safe_download_filename(st.session_state.current_title, "transcript", ".txt"),
         mime="text/plain",
     )

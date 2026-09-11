@@ -71,3 +71,53 @@ def test_transcript_is_optional_and_absent_by_default(tmp_path, monkeypatch):
     # save_video's backward-compatible signature doesn't require full_text -
     # older callers (and existing saved sources) simply have no transcript.
     assert vector_store.load_transcript("vid4") is None
+
+
+# ------------------------------------------------ reliability & security --
+
+
+def test_corrupted_library_index_is_treated_as_empty_not_a_crash(tmp_path, monkeypatch):
+    """A corrupted data/library.json must not brick the whole app - every
+    page load calls list_sources() unconditionally."""
+    vector_store = _fresh_vector_store(tmp_path, monkeypatch)
+
+    with open(vector_store.LIBRARY_PATH, "w", encoding="utf-8") as f:
+        f.write("{not valid json::")
+
+    assert vector_store.list_sources() == []
+    assert not vector_store.source_exists("anything")
+
+
+def test_source_id_with_path_traversal_is_rejected(tmp_path, monkeypatch):
+    vector_store = _fresh_vector_store(tmp_path, monkeypatch)
+
+    chunks = [{"text": "hello", "start": 0, "end": 5, "embedding": [1.0, 0.0, 0.0]}]
+    malicious_id = "../../etc/passwd"
+
+    for fn, args in [
+        (vector_store.save_source, (malicious_id, "Title", "http://x", "# Notes", chunks)),
+        (vector_store.delete_source, (malicious_id,)),
+        (vector_store.load_notes, (malicious_id,)),
+        (vector_store.load_transcript, (malicious_id,)),
+    ]:
+        try:
+            fn(*args)
+            assert False, f"{fn.__name__} should have rejected a path-traversal id"
+        except ValueError:
+            pass
+
+
+def test_source_id_with_slash_is_rejected(tmp_path, monkeypatch):
+    vector_store = _fresh_vector_store(tmp_path, monkeypatch)
+    try:
+        vector_store.load_notes("abc/def")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_normal_ids_are_unaffected_by_sanitization(tmp_path, monkeypatch):
+    vector_store = _fresh_vector_store(tmp_path, monkeypatch)
+    # YouTube-style ids and hex content hashes must keep working normally.
+    for ok_id in ("dQw4w9WgXcQ", "a1b2c3d4e5f6a7b8", "my_source-1"):
+        assert vector_store.load_notes(ok_id) is None  # doesn't raise

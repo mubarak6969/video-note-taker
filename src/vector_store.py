@@ -10,6 +10,7 @@ st.session_state) with on-disk storage under DATA_DIR, so:
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 
 import chromadb
@@ -17,6 +18,20 @@ import chromadb
 import config
 
 logger = logging.getLogger(__name__)
+
+# YouTube video ids and our own content hashes (src/ingestion/hashing.py)
+# are always plain alphanumeric/-/_. source_id ends up in filesystem paths
+# below, so anything outside that shape is rejected before it ever reaches
+# os.path.join - defense-in-depth against path traversal from a malformed
+# or malicious id, even though downloader.py already validates YouTube ids
+# at the point of origin.
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _sanitize_id(source_id: str) -> str:
+    if not source_id or not _SAFE_ID_RE.match(source_id):
+        raise ValueError(f"Invalid source id: {source_id!r}")
+    return source_id
 
 CHROMA_DIR = os.path.join(config.DATA_DIR, "chroma_db")
 LIBRARY_PATH = os.path.join(config.DATA_DIR, "library.json")
@@ -36,8 +51,17 @@ _collection = _client.get_or_create_collection(
 def _load_library():
     if not os.path.exists(LIBRARY_PATH):
         return []
-    with open(LIBRARY_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(LIBRARY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        # A corrupted index must not brick the whole app on every rerun -
+        # every page load calls list_sources() unconditionally. Treating
+        # it as an empty library is recoverable (the underlying ChromaDB
+        # data isn't touched); the error is still loud in the logs so the
+        # actual problem stays diagnosable.
+        logger.error("Library index at %s is corrupted or unreadable (%s); treating as empty.", LIBRARY_PATH, e)
+        return []
 
 
 def _save_library(library):
@@ -81,7 +105,7 @@ def get_source(source_id: str):
 
 
 def load_notes(source_id: str):
-    notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
+    notes_path = os.path.join(NOTES_DIR, f"{_sanitize_id(source_id)}.md")
     if os.path.exists(notes_path):
         with open(notes_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -91,7 +115,7 @@ def load_notes(source_id: str):
 def load_transcript(source_id: str):
     """Returns the raw extracted/transcribed text for a source, or None if
     it wasn't saved (e.g. a source processed before this existed)."""
-    transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{source_id}.txt")
+    transcript_path = os.path.join(TRANSCRIPTS_DIR, f"{_sanitize_id(source_id)}.txt")
     if os.path.exists(transcript_path):
         with open(transcript_path, "r", encoding="utf-8") as f:
             return f.read()
@@ -124,6 +148,7 @@ def save_source(
     """
     if not chunks:
         raise ValueError("Cannot save a source with no chunks.")
+    source_id = _sanitize_id(source_id)
 
     ids = [f"{source_id}_{i}" for i in range(len(chunks))]
     documents = [c["text"] for c in chunks]
@@ -190,6 +215,7 @@ def save_video(
 
 
 def delete_source(source_id: str):
+    source_id = _sanitize_id(source_id)
     _collection.delete(where={"video_id": source_id})
     notes_path = os.path.join(NOTES_DIR, f"{source_id}.md")
     if os.path.exists(notes_path):

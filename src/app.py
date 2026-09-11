@@ -24,6 +24,7 @@ if _has_secret("YOUTUBE_COOKIES"):
     with open("cookies.txt", "w") as f:
         f.write(st.secrets["YOUTUBE_COOKIES"])
 
+from ui import access_control
 from ui.chat_ui import render_chat
 from ui.ingestion_ui import render_ingestion_tabs
 from ui.onboarding import render_onboarding
@@ -32,6 +33,9 @@ from ui.state import init_session_state
 from ui.workspace import render_notes_tab, render_source_content_tab, workspace_icon
 
 st.set_page_config(page_title="Deep-Dive Knowledge Assistant", page_icon="🎯", layout="wide")
+
+# No-op unless APP_PASSWORD is configured - see src/ui/access_control.py.
+access_control.require_password()
 
 
 def _ensure_groq_key_configured():

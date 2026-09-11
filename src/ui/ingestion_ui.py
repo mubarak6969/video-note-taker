@@ -2,7 +2,6 @@
 always shown inline (st.warning/st.error) - never swallowed - per the
 existing app behavior this UI layer preserves."""
 import logging
-import re
 
 import streamlit as st
 
@@ -17,12 +16,12 @@ from ingestion import (
     ingest_youtube_url,
 )
 from services import finish_ingestion
+from ui import access_control
 from ui.constants import LANGUAGES, WHISPER_SIZES
 from ui.state import load_source
+from url_validation import is_youtube_url
 
 logger = logging.getLogger(__name__)
-
-YOUTUBE_URL_RE = re.compile(r"(youtube\.com/|youtu\.be/)", re.IGNORECASE)
 
 _DEFAULT_WHISPER_INDEX = (
     WHISPER_SIZES.index(config.WHISPER_MODEL_SIZE) if config.WHISPER_MODEL_SIZE in WHISPER_SIZES else 0
@@ -55,8 +54,10 @@ def _render_youtube_tab():
     if st.button("Process video", type="primary", key="process_youtube"):
         if not youtube_url:
             st.warning("Please paste a YouTube URL first.")
-        elif not YOUTUBE_URL_RE.search(youtube_url):
+        elif not is_youtube_url(youtube_url):
             st.warning("That doesn't look like a YouTube URL.")
+        elif not access_control.check_ingestion_allowed():
+            pass  # the limit message was already shown
         else:
             try:
                 with st.status("Processing video...", expanded=True) as status:
@@ -68,6 +69,7 @@ def _render_youtube_tab():
                         label=f"Done! Processed: {source.title}" if is_new else f"Loaded from library: {source.title}",
                         state="complete",
                     )
+                access_control.record_ingestion()
                 st.rerun()
             except DownloadError as e:
                 st.error(f"❌ Couldn't download this video: {e}")
@@ -121,6 +123,9 @@ def _process_upload(uploaded_file, language, whisper_size):
             st.rerun()
             return
 
+        if not access_control.check_ingestion_allowed():
+            return
+
         with st.status("Processing file...", expanded=True) as status:
             status.write("📖 Reading and processing file...")
             source = ingest_uploaded_file(
@@ -129,6 +134,7 @@ def _process_upload(uploaded_file, language, whisper_size):
             finish_ingestion(source, on_progress=status.write)
             load_source(source.source_id, source.title)
             status.update(label=f"Done! Processed: {source.title}", state="complete")
+        access_control.record_ingestion()
         st.rerun()
     except IngestionError as e:
         st.error(f"❌ {e}")

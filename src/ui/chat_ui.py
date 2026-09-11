@@ -5,6 +5,7 @@ import streamlit as st
 import config
 import rag_chat
 from services import answer_with_retrieval
+from ui import access_control
 from ui.constants import SOURCE_ICONS, SOURCE_LABELS
 
 
@@ -96,6 +97,9 @@ def _handle_question(question: str, scope: str, scope_source_id):
         st.rerun()
         return
 
+    if not access_control.check_question_allowed():
+        return
+
     history_pairs = [(t["question"], t["answer"]) for t in st.session_state.chat_history]
 
     with st.status("Answering...", expanded=False) as qa_status:
@@ -115,6 +119,7 @@ def _handle_question(question: str, scope: str, scope_source_id):
     elif result["stage_failed"] == "generation":
         st.error("❌ The AI service didn't respond. Please try again in a moment.")
     else:
+        access_control.record_question()
         entry = {"answer": result["answer"], "sources": result["sources"], "has_evidence": result["has_evidence"]}
         st.session_state.qa_cache[cache_key] = entry
         st.session_state.chat_history.append({"question": question, **entry})
