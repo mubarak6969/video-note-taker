@@ -1,9 +1,13 @@
-# 🎯 Deep-Dive Video Note Taker
+# 🎯 Deep-Dive Knowledge Assistant
+
+*(repo/directory name `video-note-taker` for history - the app itself is
+titled "Deep-Dive Knowledge Assistant" now that it covers more than video)*
 
 A Retrieval-Augmented Generation (RAG) app that turns YouTube videos, PDFs,
 text documents, and audio/video files into searchable notes: add a source,
 get structured notes with timestamp or page references, and ask follow-up
-questions answered strictly from that source (or your whole library).
+questions answered strictly from that source (or your whole library) -
+never inventing an answer when the evidence isn't there.
 
 ## How it works
 
@@ -272,7 +276,23 @@ retrieval settings below).
 
 ```
 src/
-  app.py              Streamlit UI (YouTube URL tab + Upload File tab)
+  app.py              Streamlit entry point - thin composition root only:
+                        env/secrets check, session-state init, and
+                        wiring src/ui/* renderers together. No business
+                        logic and no direct backend calls live here.
+  services.py           UI ↔ backend orchestration (finish_ingestion,
+                          answer_with_retrieval) - framework-agnostic,
+                          no Streamlit imports, so it's easy to reason
+                          about independent of the UI.
+  ui/                    Streamlit presentation layer (see below)
+    state.py               session-state init/load/clear
+    sidebar.py              library list: select/delete a source
+    onboarding.py            empty-library landing state
+    ingestion_ui.py          YouTube URL + Upload File tabs
+    workspace.py             Notes / Source Content tabs
+    chat_ui.py               Ask Questions tab: scope, history, citations
+    constants.py             icons/labels/language list shared by the above
+    formatting.py            pure display-formatting helpers
   config.py            environment-driven settings
   ingestion/            source-ingestion abstraction (see below)
     types.py              IngestedSource - the common normalized shape
@@ -296,6 +316,14 @@ src/
 tests/                  fast unit tests (mocked)
   evaluation/              deterministic RAG quality suite (see above)
 ```
+
+The UI is a single-page workspace: an empty library shows onboarding and
+the two ingestion tabs; once a source is selected, its notes, raw source
+content, and a chat scoped to either that source or the whole library
+sit in one tabbed workspace, so the read → ask → verify loop never
+requires leaving the page. `.streamlit/config.toml` pins a fixed light
+theme (indigo accent) for a consistent look regardless of viewer OS
+settings.
 
 Downloaded/uploaded audio lives in `downloads/` (uploads under
 `downloads/uploads/`), and persisted notes/embeddings/library index/raw
